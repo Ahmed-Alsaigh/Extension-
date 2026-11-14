@@ -1,22 +1,19 @@
 {
   "name": "gopeed-extension-gdrive",
-  "author": "your-username",
+  "author": "Ahmed-Alsaigh",
   "title": "Google Drive Resolver",
   "description": "Resolves Google Drive file and folder links using Google Apps Script or Google Drive API v3.",
-  "version": "1.2.0",
-  "homepage": "https://github.com/your-username/gopeed-extension-gdrive",
+  "version": "1.2.1",
+  "homepage": "https://github.com/Ahmed-Alsaigh/Extension-",
   "repository": {
-    "url": "https://github.com/your-username/gopeed-extension-gdrive"
+    "url": "https://github.com/Ahmed-Alsaigh/Extension-"
   },
   "scripts": [
     {
       "event": "onResolve",
       "match": {
         "urls": [
-          "*://drive.google.com/drive/folders/*",
-          "*://drive.google.com/drive/u/*/folders/*",
-          "*://drive.google.com/file/d/*",
-          "*://drive.google.com/open?id=*",
+          "*://drive.google.com/*",
           "*://drive.usercontent.google.com/*"
         ]
       },
@@ -34,7 +31,7 @@
     {
       "name": "apiKey",
       "title": "Option B: Google Drive API v3 Key",
-      "description": "Paste your Google Cloud Console API Key (AIzaSy...). Used if Apps Script URL is blank or fails.",
+      "description": "Paste your Google Cloud Console API Key (AIzaSy...). Used if Apps Script URL is blank.",
       "type": "string",
       "value": ""
     },
