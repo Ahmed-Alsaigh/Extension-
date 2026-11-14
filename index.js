@@ -60,6 +60,23 @@ function parseDriveUrl(urlStr) {
   return null;
 }
 
+function getHeader(headers, targetName) {
+  if (!headers) return "";
+  if (typeof headers.get === "function") {
+    return headers.get(targetName) || "";
+  }
+  const lowerTarget = targetName.toLowerCase();
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i].toLowerCase() === lowerTarget) {
+      const val = headers[keys[i]];
+      if (Array.isArray(val)) return val.join("; ");
+      return val ? String(val) : "";
+    }
+  }
+  return "";
+}
+
 async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
   const separator = scriptUrl.includes("?") ? "&" : "?";
   const endpoint = `${scriptUrl}${separator}id=${encodeURIComponent(
@@ -76,7 +93,7 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
   try {
     data = JSON.parse(rawText);
   } catch (e) {
-    throw new Error("Apps Script returned non-JSON response. Check Web App access is set to Anyone.");
+    throw new Error("Apps Script returned non-JSON response. Ensure Web App access is set to Anyone.");
   }
 
   if (data.error) {
@@ -88,7 +105,6 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
     throw new Error("No downloadable files found in this Drive folder.");
   }
 
-  // Resolve confirmed download URLs (extracting dynamic uuid for .zip/.apk/large files) in batches of 5
   const files = [];
   for (let i = 0; i < rawItems.length; i += 5) {
     const batch = rawItems.slice(i, i + 5);
@@ -118,61 +134,65 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
 }
 
 /**
- * Probes a Google Drive file with a 1-byte Range request.
- * If Google returns the 1.99 KB virus-scan HTML page, parses all hidden form
- * inputs (including the dynamic `uuid` token) and cookies to get the real binary URL.
+ * Probes the Drive download endpoint with a small Range header.
+ * If Google returns the virus-scan warning HTML instead of binary data,
+ * extracts all hidden form fields (including the dynamic `uuid`) and cookies.
  */
 async function resolveConfirmedDownload(fileId) {
-  const initialUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
+  const initialUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
 
-  try {
-    const resp = await fetch(initialUrl, {
-      method: "GET",
-      redirect: "follow",
-      headers: {
-        "User-Agent": USER_AGENT,
-        Range: "bytes=0-0",
-      },
-    });
+  const resp = await fetch(initialUrl, {
+    method: "GET",
+    headers: {
+      "User-Agent": USER_AGENT,
+      Range: "bytes=0-2047",
+    },
+  });
 
-    const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+  const contentType = getHeader(resp.headers, "content-type").toLowerCase();
+  const bodyText = await resp.text();
+  const looksLikeHtml =
+    contentType.includes("text/html") ||
+    bodyText.trimStart().startsWith("<!DOCTYPE") ||
+    bodyText.trimStart().startsWith("<html");
 
-    if (contentType.includes("text/html")) {
-      const html = await resp.text();
-      const confirmedUrl = parseDriveConfirmationForm(html, fileId);
-      const cookieHeader = extractCookies(resp.headers);
+  if (looksLikeHtml) {
+    const confirmedUrl = parseDriveConfirmationForm(bodyText, fileId);
+    const rawCookie = getHeader(resp.headers, "set-cookie");
+    const cookieHeader = rawCookie
+      ? rawCookie
+          .split(/,(?=\s*[a-zA-Z0-9_-]+=)/)
+          .map((c) => c.split(";")[0].trim())
+          .filter(Boolean)
+          .join("; ")
+      : "";
 
-      const headers = { "User-Agent": USER_AGENT };
-      if (cookieHeader) {
-        headers.Cookie = cookieHeader;
-      }
-
-      return {
-        url: confirmedUrl,
-        headers: headers,
-      };
+    const headers = { "User-Agent": USER_AGENT };
+    if (cookieHeader) {
+      headers.Cookie = cookieHeader;
     }
 
     return {
-      url: initialUrl,
-      headers: { "User-Agent": USER_AGENT },
-    };
-  } catch (err) {
-    return {
-      url: `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`,
-      headers: { "User-Agent": USER_AGENT },
+      url: confirmedUrl,
+      headers: headers,
     };
   }
+
+  return {
+    url: initialUrl,
+    headers: { "User-Agent": USER_AGENT },
+  };
 }
 
 function parseDriveConfirmationForm(html, fileId) {
-  const formActionMatch =
-    html.match(/<form[^>]+id=["']download-form["'][^>]+action=["']([^"']+)["']/i) ||
-    html.match(/<form[^>]+action=["']([^"']+)["'][^>]+id=["']download-form["']/i);
-
-  const baseUrl = formActionMatch
-    ? decodeHtmlEntities(formActionMatch[1])
-    : "https://drive.usercontent.google.com/download";
+  const formMatch = html.match(/<form\b[^>]*>/i);
+  let baseUrl = "https://drive.usercontent.google.com/download";
+  if (formMatch) {
+    const actionMatch = formMatch[0].match(/\baction=["']?([^"'\s>]+)["']?/i);
+    if (actionMatch && actionMatch[1]) {
+      baseUrl = decodeHtmlEntities(actionMatch[1]);
+    }
+  }
 
   const params = [];
   const inputRegex = /<input\b[^>]*>/gi;
@@ -180,12 +200,12 @@ function parseDriveConfirmationForm(html, fileId) {
 
   while ((match = inputRegex.exec(html)) !== null) {
     const tag = match[0];
-    if (!/type=["']hidden["']/i.test(tag)) continue;
+    if (!/\btype=["']?hidden["']?/i.test(tag)) continue;
 
-    const nameMatch = tag.match(/\bname=["']([^"']+)["']/i);
-    const valueMatch = tag.match(/\bvalue=["']([^"']*)["']/i);
+    const nameMatch = tag.match(/\bname=["']?([^"'\s>]+)["']?/i);
+    const valueMatch = tag.match(/\bvalue=["']([^"']*)["']/i) || tag.match(/\bvalue=([^\s>]+)/i);
 
-    if (nameMatch) {
+    if (nameMatch && nameMatch[1]) {
       const key = decodeHtmlEntities(nameMatch[1]);
       const val = valueMatch ? decodeHtmlEntities(valueMatch[1]) : "";
       params.push(`${encodeURIComponent(key)}=${encodeURIComponent(val)}`);
@@ -197,18 +217,17 @@ function parseDriveConfirmationForm(html, fileId) {
     return `${baseUrl}${sep}${params.join("&")}`;
   }
 
-  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
-}
+  // Direct regex fallback if form attributes differ
+  const uuidMatch =
+    html.match(/\bname=["']?uuid["']?[^>]*\bvalue=["']?([^"'\s>]+)/i) ||
+    html.match(/[?&]uuid=([a-zA-Z0-9_-]+)/i);
+  if (uuidMatch && uuidMatch[1]) {
+    return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t&uuid=${encodeURIComponent(
+      uuidMatch[1]
+    )}`;
+  }
 
-function extractCookies(headers) {
-  if (!headers || typeof headers.get !== "function") return "";
-  const raw = headers.get("set-cookie");
-  if (!raw) return "";
-  const parts = raw.split(/,(?=\s*[a-zA-Z0-9_-]+=)/);
-  return parts
-    .map((c) => c.split(";")[0].trim())
-    .filter(Boolean)
-    .join("; ");
+  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
 }
 
 async function resolveAutoWithApi(ctx, id, apiKey, recursive) {
