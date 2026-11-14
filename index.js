@@ -33,7 +33,7 @@ gopeed.events.onResolve(async (ctx) => {
     return;
   }
 
-  // 3. Public HTML fallback (only when both Option A and Option B are empty)
+  // 3. Public HTML fallback
   if (parsed.type === "folder") {
     await resolveFolderFallback(ctx, parsed.id);
   } else {
@@ -83,18 +83,31 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
     throw new Error(`Apps Script error: ${data.error}`);
   }
 
-  const files = (data.files || []).map((item) => ({
-    name: item.name,
-    path: item.path || "",
-    size: item.size ? Number(item.size) : 0,
-    req: {
-      url: item.url,
-      headers: { "User-Agent": USER_AGENT },
-    },
-  }));
-
-  if (files.length === 0) {
+  const rawItems = data.files || [];
+  if (rawItems.length === 0) {
     throw new Error("No downloadable files found in this Drive folder.");
+  }
+
+  // Resolve confirmed download URLs (extracting dynamic uuid for .zip/.apk/large files) in batches of 5
+  const files = [];
+  for (let i = 0; i < rawItems.length; i += 5) {
+    const batch = rawItems.slice(i, i + 5);
+    const resolvedBatch = await Promise.all(
+      batch.map(async (item) => {
+        const isGoogleExport = item.url && item.url.includes("docs.google.com/");
+        const reqInfo = isGoogleExport
+          ? { url: item.url, headers: { "User-Agent": USER_AGENT } }
+          : await resolveConfirmedDownload(item.id);
+
+        return {
+          name: item.name,
+          path: item.path || "",
+          size: item.size ? Number(item.size) : 0,
+          req: reqInfo,
+        };
+      })
+    );
+    files.push(...resolvedBatch);
   }
 
   ctx.res = {
@@ -102,6 +115,100 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
     range: true,
     files: files,
   };
+}
+
+/**
+ * Probes a Google Drive file with a 1-byte Range request.
+ * If Google returns the 1.99 KB virus-scan HTML page, parses all hidden form
+ * inputs (including the dynamic `uuid` token) and cookies to get the real binary URL.
+ */
+async function resolveConfirmedDownload(fileId) {
+  const initialUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
+
+  try {
+    const resp = await fetch(initialUrl, {
+      method: "GET",
+      redirect: "follow",
+      headers: {
+        "User-Agent": USER_AGENT,
+        Range: "bytes=0-0",
+      },
+    });
+
+    const contentType = (resp.headers.get("content-type") || "").toLowerCase();
+
+    if (contentType.includes("text/html")) {
+      const html = await resp.text();
+      const confirmedUrl = parseDriveConfirmationForm(html, fileId);
+      const cookieHeader = extractCookies(resp.headers);
+
+      const headers = { "User-Agent": USER_AGENT };
+      if (cookieHeader) {
+        headers.Cookie = cookieHeader;
+      }
+
+      return {
+        url: confirmedUrl,
+        headers: headers,
+      };
+    }
+
+    return {
+      url: initialUrl,
+      headers: { "User-Agent": USER_AGENT },
+    };
+  } catch (err) {
+    return {
+      url: `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`,
+      headers: { "User-Agent": USER_AGENT },
+    };
+  }
+}
+
+function parseDriveConfirmationForm(html, fileId) {
+  const formActionMatch =
+    html.match(/<form[^>]+id=["']download-form["'][^>]+action=["']([^"']+)["']/i) ||
+    html.match(/<form[^>]+action=["']([^"']+)["'][^>]+id=["']download-form["']/i);
+
+  const baseUrl = formActionMatch
+    ? decodeHtmlEntities(formActionMatch[1])
+    : "https://drive.usercontent.google.com/download";
+
+  const params = [];
+  const inputRegex = /<input\b[^>]*>/gi;
+  let match;
+
+  while ((match = inputRegex.exec(html)) !== null) {
+    const tag = match[0];
+    if (!/type=["']hidden["']/i.test(tag)) continue;
+
+    const nameMatch = tag.match(/\bname=["']([^"']+)["']/i);
+    const valueMatch = tag.match(/\bvalue=["']([^"']*)["']/i);
+
+    if (nameMatch) {
+      const key = decodeHtmlEntities(nameMatch[1]);
+      const val = valueMatch ? decodeHtmlEntities(valueMatch[1]) : "";
+      params.push(`${encodeURIComponent(key)}=${encodeURIComponent(val)}`);
+    }
+  }
+
+  if (params.length > 0) {
+    const sep = baseUrl.includes("?") ? "&" : "?";
+    return `${baseUrl}${sep}${params.join("&")}`;
+  }
+
+  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+}
+
+function extractCookies(headers) {
+  if (!headers || typeof headers.get !== "function") return "";
+  const raw = headers.get("set-cookie");
+  if (!raw) return "";
+  const parts = raw.split(/,(?=\s*[a-zA-Z0-9_-]+=)/);
+  return parts
+    .map((c) => c.split(";")[0].trim())
+    .filter(Boolean)
+    .join("; ");
 }
 
 async function resolveAutoWithApi(ctx, id, apiKey, recursive) {
@@ -241,25 +348,27 @@ async function resolveFolderFallback(ctx, folderId) {
 
   const entryRegex =
     /id="entry-([a-zA-Z0-9_-]+)"[\s\S]*?<div class="flip-entry-title">([^<]+)<\/div>/g;
-  const files = [];
+  const rawEntries = [];
   let match;
 
   while ((match = entryRegex.exec(html)) !== null) {
-    const fileId = match[1];
-    const fileName = decodeHtmlEntities(match[2].trim());
-    files.push({
-      name: fileName,
-      size: 0,
-      req: {
-        url: buildDirectDownloadUrl(fileId),
-        headers: { "User-Agent": USER_AGENT },
-      },
+    rawEntries.push({
+      id: match[1],
+      name: decodeHtmlEntities(match[2].trim()),
     });
   }
 
-  if (files.length === 0) {
+  if (rawEntries.length === 0) {
     throw new Error("No files found; configure an Apps Script URL or API Key.");
   }
+
+  const files = await Promise.all(
+    rawEntries.map(async (entry) => ({
+      name: entry.name,
+      size: 0,
+      req: await resolveConfirmedDownload(entry.id),
+    }))
+  );
 
   ctx.res = {
     name: folderName,
@@ -283,6 +392,8 @@ async function resolveSingleFileFallback(ctx, fileId) {
     }
   }
 
+  const reqInfo = await resolveConfirmedDownload(fileId);
+
   ctx.res = {
     name: fileName,
     range: true,
@@ -290,17 +401,10 @@ async function resolveSingleFileFallback(ctx, fileId) {
       {
         name: fileName,
         size: 0,
-        req: {
-          url: buildDirectDownloadUrl(fileId),
-          headers: { "User-Agent": USER_AGENT },
-        },
+        req: reqInfo,
       },
     ],
   };
-}
-
-function buildDirectDownloadUrl(fileId) {
-  return `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
 }
 
 function decodeHtmlEntities(str) {
