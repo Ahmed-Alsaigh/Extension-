@@ -1,0 +1,42 @@
+{
+  "name": "gopeed-extension-gdrive",
+  "author": "your-username",
+  "title": "Google Drive Resolver",
+  "description": "Resolves Google Drive file and folder links and lists all downloadable contents.",
+  "version": "1.0.0",
+  "homepage": "https://github.com/your-username/gopeed-extension-gdrive",
+  "repository": {
+    "url": "https://github.com/your-username/gopeed-extension-gdrive"
+  },
+  "scripts": [
+    {
+      "event": "onResolve",
+      "match": {
+        "urls": [
+          "*://drive.google.com/drive/folders/*",
+          "*://drive.google.com/drive/u/*/folders/*",
+          "*://drive.google.com/file/d/*",
+          "*://drive.google.com/open?id=*",
+          "*://drive.usercontent.google.com/*"
+        ]
+      },
+      "entry": "index.js"
+    }
+  ],
+  "settings": [
+    {
+      "name": "apiKey",
+      "title": "Google Drive API Key (Required for Folders)",
+      "description": "Create a free API Key in Google Cloud Console with Google Drive API v3 enabled to list full folder contents and bypass virus scan prompts.",
+      "type": "string",
+      "value": ""
+    },
+    {
+      "name": "recursive",
+      "title": "Resolve Subfolders Recursively",
+      "description": "Automatically traverse nested subfolders when resolving a Drive folder.",
+      "type": "boolean",
+      "value": true
+    }
+  ]
+}
