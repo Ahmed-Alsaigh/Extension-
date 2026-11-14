@@ -4,7 +4,9 @@ const USER_AGENT =
 gopeed.events.onResolve(async (ctx) => {
   const rawUrl = ctx.req.url;
   const settings = gopeed.settings || {};
-  const scriptUrl = settings.scriptUrl ? settings.scriptUrl.trim() : "";
+  const scriptUrl = settings.scriptUrl
+    ? settings.scriptUrl.trim().replace(/^https?:\/\//i, (m) => m.toLowerCase())
+    : "";
   const apiKey = settings.apiKey ? settings.apiKey.trim() : "";
   const recursive = settings.recursive !== undefined ? Boolean(settings.recursive) : true;
 
@@ -29,8 +31,10 @@ gopeed.events.onResolve(async (ctx) => {
     try {
       if (parsed.type === "folder") {
         await resolveFolderWithApi(ctx, parsed.id, apiKey, recursive);
-      } else {
+      } else if (parsed.type === "file") {
         await resolveSingleFileWithApi(ctx, parsed.id, apiKey);
+      } else {
+        await resolveAutoWithApi(ctx, parsed.id, apiKey, recursive);
       }
       return;
     } catch (err) {
@@ -38,7 +42,7 @@ gopeed.events.onResolve(async (ctx) => {
     }
   }
 
-  // 3. Public HTML fallback (no key or script required)
+  // 3. Public HTML fallback
   try {
     if (parsed.type === "folder") {
       await resolveFolderFallback(ctx, parsed.id);
@@ -50,9 +54,6 @@ gopeed.events.onResolve(async (ctx) => {
   }
 });
 
-/**
- * Extracts type ('file' | 'folder') and ID from a Google Drive URL
- */
 function parseDriveUrl(urlStr) {
   const folderMatch = urlStr.match(/\/folders\/([a-zA-Z0-9_-]+)/);
   if (folderMatch) {
@@ -66,15 +67,12 @@ function parseDriveUrl(urlStr) {
 
   const idParamMatch = urlStr.match(/[?&]id=([a-zA-Z0-9_-]+)/);
   if (idParamMatch) {
-    return { type: "file", id: idParamMatch[1] };
+    return { type: "auto", id: idParamMatch[1] };
   }
 
   return null;
 }
 
-/**
- * Method A: Resolves file or folder via Google Apps Script Web App
- */
 async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
   const separator = scriptUrl.includes("?") ? "&" : "?";
   const endpoint = `${scriptUrl}${separator}id=${encodeURIComponent(
@@ -120,9 +118,19 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
   };
 }
 
-/**
- * Method B1: Resolves a folder (and optionally subfolders) using Google Drive API v3
- */
+async function resolveAutoWithApi(ctx, id, apiKey, recursive) {
+  const metaUrl = `https://www.googleapis.com/drive/v3/files/${id}?fields=id,name,size,mimeType&key=${apiKey}`;
+  const resp = await fetch(metaUrl);
+  if (!resp.ok) {
+    throw new Error(`Drive API probe HTTP ${resp.status}`);
+  }
+  const meta = await resp.json();
+  if (meta.mimeType === "application/vnd.google-apps.folder") {
+    return resolveFolderWithApi(ctx, id, apiKey, recursive);
+  }
+  return resolveSingleFileWithApi(ctx, id, apiKey);
+}
+
 async function resolveFolderWithApi(ctx, folderId, apiKey, recursive) {
   const folderMetaUrl = `https://www.googleapis.com/drive/v3/files/${folderId}?fields=name&key=${apiKey}`;
   const metaResp = await fetch(folderMetaUrl);
@@ -200,9 +208,6 @@ async function fetchFolderChildren(folderId, currentPath, apiKey, recursive, fil
   } while (pageToken);
 }
 
-/**
- * Method B2: Resolves a single file using Google Drive API v3
- */
 async function resolveSingleFileWithApi(ctx, fileId, apiKey) {
   const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,size,mimeType&key=${apiKey}`;
   const resp = await fetch(metaUrl);
@@ -232,9 +237,6 @@ async function resolveSingleFileWithApi(ctx, fileId, apiKey) {
   };
 }
 
-/**
- * Method C1: Public embedded folder view fallback (no API key or Apps Script)
- */
 async function resolveFolderFallback(ctx, folderId) {
   const embedUrl = `https://drive.google.com/embeddedfolderview?id=${folderId}#list`;
   const resp = await fetch(embedUrl, {
@@ -280,9 +282,6 @@ async function resolveFolderFallback(ctx, folderId) {
   };
 }
 
-/**
- * Method C2: Public single-file fallback (bypasses virus scan confirmation)
- */
 async function resolveSingleFileFallback(ctx, fileId) {
   const viewUrl = `https://drive.google.com/file/d/${fileId}/view`;
   const resp = await fetch(viewUrl, {
