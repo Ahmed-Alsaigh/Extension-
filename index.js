@@ -12,45 +12,32 @@ gopeed.events.onResolve(async (ctx) => {
 
   const parsed = parseDriveUrl(rawUrl);
   if (!parsed) {
-    gopeed.logger.warn("Unrecognized Google Drive URL format: " + rawUrl);
     return;
   }
 
-  // 1. Try Google Apps Script Web App if configured
+  // 1. Google Apps Script Web App (Option A)
   if (scriptUrl) {
-    try {
-      await resolveWithAppsScript(ctx, parsed, scriptUrl, recursive);
-      return;
-    } catch (err) {
-      gopeed.logger.warn("Apps Script resolution failed, trying fallback: " + err.message);
-    }
+    await resolveWithAppsScript(ctx, parsed, scriptUrl, recursive);
+    return;
   }
 
-  // 2. Try Google Drive API v3 if configured
+  // 2. Google Drive API v3 (Option B)
   if (apiKey) {
-    try {
-      if (parsed.type === "folder") {
-        await resolveFolderWithApi(ctx, parsed.id, apiKey, recursive);
-      } else if (parsed.type === "file") {
-        await resolveSingleFileWithApi(ctx, parsed.id, apiKey);
-      } else {
-        await resolveAutoWithApi(ctx, parsed.id, apiKey, recursive);
-      }
-      return;
-    } catch (err) {
-      gopeed.logger.warn("Drive API resolution failed, trying public fallback: " + err.message);
+    if (parsed.type === "folder") {
+      await resolveFolderWithApi(ctx, parsed.id, apiKey, recursive);
+    } else if (parsed.type === "file") {
+      await resolveSingleFileWithApi(ctx, parsed.id, apiKey);
+    } else {
+      await resolveAutoWithApi(ctx, parsed.id, apiKey, recursive);
     }
+    return;
   }
 
-  // 3. Public HTML fallback
-  try {
-    if (parsed.type === "folder") {
-      await resolveFolderFallback(ctx, parsed.id);
-    } else {
-      await resolveSingleFileFallback(ctx, parsed.id);
-    }
-  } catch (err) {
-    gopeed.logger.error("All Google Drive resolution methods failed: " + err.message);
+  // 3. Public HTML fallback (only when both Option A and Option B are empty)
+  if (parsed.type === "folder") {
+    await resolveFolderFallback(ctx, parsed.id);
+  } else {
+    await resolveSingleFileFallback(ctx, parsed.id);
   }
 });
 
@@ -79,22 +66,21 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
     parsed.id
   )}&type=${encodeURIComponent(parsed.type)}&recursive=${recursive}`;
 
-  const resp = await fetch(endpoint, {
-    method: "GET",
-    redirect: "follow",
-    headers: {
-      "User-Agent": USER_AGENT,
-      Accept: "application/json",
-    },
-  });
-
+  const resp = await fetch(endpoint);
   if (!resp.ok) {
     throw new Error(`Apps Script HTTP ${resp.status}`);
   }
 
-  const data = await resp.json();
+  const rawText = await resp.text();
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch (e) {
+    throw new Error("Apps Script returned non-JSON response. Check Web App access is set to Anyone.");
+  }
+
   if (data.error) {
-    throw new Error(data.error);
+    throw new Error(`Apps Script error: ${data.error}`);
   }
 
   const files = (data.files || []).map((item) => ({
@@ -108,7 +94,7 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
   }));
 
   if (files.length === 0) {
-    throw new Error("No downloadable files returned by Apps Script.");
+    throw new Error("No downloadable files found in this Drive folder.");
   }
 
   ctx.res = {
