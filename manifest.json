@@ -2,8 +2,8 @@
   "name": "gopeed-extension-gdrive",
   "author": "your-username",
   "title": "Google Drive Resolver",
-  "description": "Resolves Google Drive file and folder links and lists all downloadable contents.",
-  "version": "1.0.0",
+  "description": "Resolves Google Drive file and folder links using Google Apps Script or Google Drive API v3.",
+  "version": "1.2.0",
   "homepage": "https://github.com/your-username/gopeed-extension-gdrive",
   "repository": {
     "url": "https://github.com/your-username/gopeed-extension-gdrive"
@@ -25,9 +25,16 @@
   ],
   "settings": [
     {
+      "name": "scriptUrl",
+      "title": "Option A: Apps Script Web App URL",
+      "description": "Paste your deployed Google Apps Script Web App URL (https://script.google.com/macros/s/.../exec). Leave blank if using an API Key.",
+      "type": "string",
+      "value": ""
+    },
+    {
       "name": "apiKey",
-      "title": "Google Drive API Key (Required for Folders)",
-      "description": "Create a free API Key in Google Cloud Console with Google Drive API v3 enabled to list full folder contents and bypass virus scan prompts.",
+      "title": "Option B: Google Drive API v3 Key",
+      "description": "Paste your Google Cloud Console API Key (AIzaSy...). Used if Apps Script URL is blank or fails.",
       "type": "string",
       "value": ""
     },
