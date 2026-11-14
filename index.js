@@ -3,8 +3,10 @@ const USER_AGENT =
 
 gopeed.events.onResolve(async (ctx) => {
   const rawUrl = ctx.req.url;
-  const apiKey = (gopeed.settings && gopeed.settings.apiKey) ? gopeed.settings.apiKey.trim() : "";
-  const recursive = gopeed.settings ? Boolean(gopeed.settings.recursive) : true;
+  const settings = gopeed.settings || {};
+  const scriptUrl = settings.scriptUrl ? settings.scriptUrl.trim() : "";
+  const apiKey = settings.apiKey ? settings.apiKey.trim() : "";
+  const recursive = settings.recursive !== undefined ? Boolean(settings.recursive) : true;
 
   const parsed = parseDriveUrl(rawUrl);
   if (!parsed) {
@@ -12,22 +14,39 @@ gopeed.events.onResolve(async (ctx) => {
     return;
   }
 
-  try {
-    if (parsed.type === "folder") {
-      if (apiKey) {
+  // 1. Try Google Apps Script Web App if configured
+  if (scriptUrl) {
+    try {
+      await resolveWithAppsScript(ctx, parsed, scriptUrl, recursive);
+      return;
+    } catch (err) {
+      gopeed.logger.warn("Apps Script resolution failed, trying fallback: " + err.message);
+    }
+  }
+
+  // 2. Try Google Drive API v3 if configured
+  if (apiKey) {
+    try {
+      if (parsed.type === "folder") {
         await resolveFolderWithApi(ctx, parsed.id, apiKey, recursive);
       } else {
-        await resolveFolderFallback(ctx, parsed.id);
-      }
-    } else {
-      if (apiKey) {
         await resolveSingleFileWithApi(ctx, parsed.id, apiKey);
-      } else {
-        await resolveSingleFileFallback(ctx, parsed.id);
       }
+      return;
+    } catch (err) {
+      gopeed.logger.warn("Drive API resolution failed, trying public fallback: " + err.message);
+    }
+  }
+
+  // 3. Public HTML fallback (no key or script required)
+  try {
+    if (parsed.type === "folder") {
+      await resolveFolderFallback(ctx, parsed.id);
+    } else {
+      await resolveSingleFileFallback(ctx, parsed.id);
     }
   } catch (err) {
-    gopeed.logger.error("Google Drive resolution failed: " + err.message);
+    gopeed.logger.error("All Google Drive resolution methods failed: " + err.message);
   }
 });
 
@@ -54,20 +73,72 @@ function parseDriveUrl(urlStr) {
 }
 
 /**
- * Resolves a folder (and optionally subfolders) using Google Drive API v3
+ * Method A: Resolves file or folder via Google Apps Script Web App
+ */
+async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
+  const separator = scriptUrl.includes("?") ? "&" : "?";
+  const endpoint = `${scriptUrl}${separator}id=${encodeURIComponent(
+    parsed.id
+  )}&type=${encodeURIComponent(parsed.type)}&recursive=${recursive}`;
+
+  const resp = await fetch(endpoint, {
+    method: "GET",
+    redirect: "follow",
+    headers: {
+      "User-Agent": USER_AGENT,
+      Accept: "application/json",
+    },
+  });
+
+  if (!resp.ok) {
+    throw new Error(`Apps Script HTTP ${resp.status}`);
+  }
+
+  const data = await resp.json();
+  if (data.error) {
+    throw new Error(data.error);
+  }
+
+  const files = (data.files || []).map((item) => ({
+    name: item.name,
+    path: item.path || "",
+    size: item.size ? Number(item.size) : 0,
+    req: {
+      url: item.url,
+      headers: { "User-Agent": USER_AGENT },
+    },
+  }));
+
+  if (files.length === 0) {
+    throw new Error("No downloadable files returned by Apps Script.");
+  }
+
+  ctx.res = {
+    name: data.name || `GDrive_${parsed.id}`,
+    range: true,
+    files: files,
+  };
+}
+
+/**
+ * Method B1: Resolves a folder (and optionally subfolders) using Google Drive API v3
  */
 async function resolveFolderWithApi(ctx, folderId, apiKey, recursive) {
   const folderMetaUrl = `https://www.googleapis.com/drive/v3/files/${folderId}?fields=name&key=${apiKey}`;
   const metaResp = await fetch(folderMetaUrl);
-  let rootFolderName = `GDrive_${folderId}`;
-
-  if (metaResp.ok) {
-    const metaJson = await metaResp.json();
-    if (metaJson.name) rootFolderName = metaJson.name;
+  if (!metaResp.ok) {
+    throw new Error(`Drive API metadata HTTP ${metaResp.status}`);
   }
 
+  const metaJson = await metaResp.json();
+  const rootFolderName = metaJson.name || `GDrive_${folderId}`;
   const filesList = [];
+
   await fetchFolderChildren(folderId, "", apiKey, recursive, filesList);
+
+  if (filesList.length === 0) {
+    throw new Error("Folder is empty or inaccessible.");
+  }
 
   ctx.res = {
     name: rootFolderName,
@@ -88,7 +159,7 @@ async function fetchFolderChildren(folderId, currentPath, apiKey, recursive, fil
 
     const resp = await fetch(apiUrl);
     if (!resp.ok) {
-      throw new Error(`Drive API returned HTTP ${resp.status}`);
+      throw new Error(`Drive API list HTTP ${resp.status}`);
     }
 
     const data = await resp.json();
@@ -101,7 +172,6 @@ async function fetchFolderChildren(folderId, currentPath, apiKey, recursive, fil
           await fetchFolderChildren(item.id, nextPath, apiKey, recursive, filesList);
         }
       } else if (item.mimeType.startsWith("application/vnd.google-apps.")) {
-        // Export Google Docs/Sheets/Slides as PDF so they are downloadable
         const exportUrl = `https://www.googleapis.com/drive/v3/files/${item.id}/export?mimeType=application/pdf&key=${apiKey}`;
         filesList.push({
           name: `${item.name}.pdf`,
@@ -113,7 +183,6 @@ async function fetchFolderChildren(folderId, currentPath, apiKey, recursive, fil
           },
         });
       } else {
-        // Direct binary file download via API alt=media
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media&key=${apiKey}`;
         filesList.push({
           name: item.name,
@@ -132,7 +201,39 @@ async function fetchFolderChildren(folderId, currentPath, apiKey, recursive, fil
 }
 
 /**
- * Fallback folder parser (scrapes embedded public folder HTML when no API Key is set)
+ * Method B2: Resolves a single file using Google Drive API v3
+ */
+async function resolveSingleFileWithApi(ctx, fileId, apiKey) {
+  const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,size,mimeType&key=${apiKey}`;
+  const resp = await fetch(metaUrl);
+  if (!resp.ok) {
+    throw new Error(`Drive API file HTTP ${resp.status}`);
+  }
+
+  const file = await resp.json();
+  const isGoogleDoc = file.mimeType && file.mimeType.startsWith("application/vnd.google-apps.");
+  const downloadUrl = isGoogleDoc
+    ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf&key=${apiKey}`
+    : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+
+  ctx.res = {
+    name: isGoogleDoc ? `${file.name}.pdf` : file.name,
+    range: true,
+    files: [
+      {
+        name: isGoogleDoc ? `${file.name}.pdf` : file.name,
+        size: file.size ? parseInt(file.size, 10) : 0,
+        req: {
+          url: downloadUrl,
+          headers: { "User-Agent": USER_AGENT },
+        },
+      },
+    ],
+  };
+}
+
+/**
+ * Method C1: Public embedded folder view fallback (no API key or Apps Script)
  */
 async function resolveFolderFallback(ctx, folderId) {
   const embedUrl = `https://drive.google.com/embeddedfolderview?id=${folderId}#list`;
@@ -141,15 +242,17 @@ async function resolveFolderFallback(ctx, folderId) {
   });
 
   if (!resp.ok) {
-    throw new Error(`Failed to fetch public folder view (${resp.status})`);
+    throw new Error(`Embedded folder HTTP ${resp.status}`);
   }
 
   const html = await resp.text();
   const titleMatch = html.match(/<title>([^<]+)<\/title>/i);
-  const folderName = titleMatch ? titleMatch[1].replace(/ - Google Drive$/i, "").trim() : `GDrive_${folderId}`;
+  const folderName = titleMatch
+    ? titleMatch[1].replace(/ - Google Drive$/i, "").trim()
+    : `GDrive_${folderId}`;
 
-  // Match entry blocks in embeddedfolderview
-  const entryRegex = /id="entry-([a-zA-Z0-9_-]+)"[\s\S]*?<div class="flip-entry-title">([^<]+)<\/div>/g;
+  const entryRegex =
+    /id="entry-([a-zA-Z0-9_-]+)"[\s\S]*?<div class="flip-entry-title">([^<]+)<\/div>/g;
   const files = [];
   let match;
 
@@ -167,7 +270,7 @@ async function resolveFolderFallback(ctx, folderId) {
   }
 
   if (files.length === 0) {
-    throw new Error("No files found or folder requires an API key.");
+    throw new Error("No files found; configure an Apps Script URL or API Key.");
   }
 
   ctx.res = {
@@ -178,37 +281,7 @@ async function resolveFolderFallback(ctx, folderId) {
 }
 
 /**
- * Resolves a single file using Google Drive API v3
- */
-async function resolveSingleFileWithApi(ctx, fileId, apiKey) {
-  const metaUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,size,mimeType&key=${apiKey}`;
-  const resp = await fetch(metaUrl);
-
-  if (!resp.ok) {
-    return resolveSingleFileFallback(ctx, fileId);
-  }
-
-  const file = await resp.json();
-  const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
-
-  ctx.res = {
-    name: file.name,
-    range: true,
-    files: [
-      {
-        name: file.name,
-        size: file.size ? parseInt(file.size, 10) : 0,
-        req: {
-          url: downloadUrl,
-          headers: { "User-Agent": USER_AGENT },
-        },
-      },
-    ],
-  };
-}
-
-/**
- * Fallback single-file resolver without API Key (bypasses virus scan confirmation)
+ * Method C2: Public single-file fallback (bypasses virus scan confirmation)
  */
 async function resolveSingleFileFallback(ctx, fileId) {
   const viewUrl = `https://drive.google.com/file/d/${fileId}/view`;
