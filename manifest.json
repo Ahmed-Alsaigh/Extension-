@@ -1,46 +1,51 @@
-{
-  "name": "gopeed-extension-gdrive",
-  "author": "Ahmed-Alsaigh",
-  "title": "Google Drive Resolver",
-  "description": "Resolves Google Drive file and folder links using Google Apps Script or Google Drive API v3.",
-  "version": "1.2.4",
-  "homepage": "https://github.com/Ahmed-Alsaigh/Extension-",
-  "repository": {
-    "url": "https://github.com/Ahmed-Alsaigh/Extension-"
-  },
-  "scripts": [
     {
-      "event": "onResolve",
-      "match": {
-        "urls": [
-          "*://drive.google.com/*",
-          "*://drive.usercontent.google.com/*"
-        ]
+      "name": "gopeed-extension-gdrive",
+      "author": "Ahmed-Alsaigh",
+      "title": "Google Drive Resolver",
+      "description": "Resolves Google Drive file and folder links
+      using Google Apps Script or Google Drive API v3.",
+      "version": "1.2.5",
+      "homepage": "https://github.com/Ahmed-Alsaigh/Extension-",
+      "repository": {
+        "url": "https://github.com/Ahmed-Alsaigh/Extension-"
       },
-      "entry": "index.js"
+      "scripts": [
+        {
+          "event": "onResolve",
+          "match": {
+            "urls": [
+              "*://drive.google.com/*",
+              "*://drive.usercontent.google.com/*"
+            ]
+          },
+          "entry": "index.js"
+        }
+      ],
+      "settings": [
+        {
+          "name": "scriptUrl",
+          "title": "Option A: Apps Script Web App URL",
+          "description": "Paste your deployed Google Apps Script Web
+          App URL (https://script.google.com/macros/s/.../exec).
+          Leave blank if using an API Key.",
+          "type": "string",
+          "value": ""
+        },
+        {
+          "name": "apiKey",
+          "title": "Option B: Google Drive API v3 Key",
+          "description": "Paste your Google Cloud Console API Key
+          (AIzaSy...). Used if Apps Script URL is blank.",
+          "type": "string",
+          "value": ""
+        },
+        {
+          "name": "recursive",
+          "title": "Resolve Subfolders Recursively",
+          "description": "Automatically traverse nested subfolders
+          when resolving a Drive folder.",
+          "type": "boolean",
+          "value": true
+        }
+      ]
     }
-  ],
-  "settings": [
-    {
-      "name": "scriptUrl",
-      "title": "Option A: Apps Script Web App URL",
-      "description": "Paste your deployed Google Apps Script Web App URL (https://script.google.com/macros/s/.../exec). Leave blank if using an API Key.",
-      "type": "string",
-      "value": ""
-    },
-    {
-      "name": "apiKey",
-      "title": "Option B: Google Drive API v3 Key",
-      "description": "Paste your Google Cloud Console API Key (AIzaSy...). Used if Apps Script URL is blank.",
-      "type": "string",
-      "value": ""
-    },
-    {
-      "name": "recursive",
-      "title": "Resolve Subfolders Recursively",
-      "description": "Automatically traverse nested subfolders when resolving a Drive folder.",
-      "type": "boolean",
-      "value": true
-    }
-  ]
-}
