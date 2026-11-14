@@ -153,6 +153,24 @@ async function resolveWithAppsScript(ctx, parsed, scriptUrl, recursive) {
   };
 }
 
+async function resolveApiDownloadTarget(fileId, apiKey) {
+  const apiStreamUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&key=${apiKey}`;
+  try {
+    const probeResp = await fetch(apiStreamUrl, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        Range: "bytes=0-0",
+      },
+    });
+    if (probeResp.status === 200 || probeResp.status === 206) {
+      return apiStreamUrl;
+    }
+  } catch (e) {
+    // Fall through to confirmed usercontent URL
+  }
+  return resolveConfirmedUserContentUrl(fileId);
+}
+
 async function resolveConfirmedUserContentUrl(fileId) {
   const initialUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download`;
   try {
@@ -322,7 +340,7 @@ async function fetchFolderChildren(
           },
         });
       } else {
-        const downloadUrl = `https://www.googleapis.com/drive/v3/files/${item.id}?alt=media&acknowledgeAbuse=true&key=${apiKey}`;
+        const downloadUrl = await resolveApiDownloadTarget(item.id, apiKey);
         filesList.push({
           name: item.name,
           path: currentPath,
@@ -353,7 +371,7 @@ async function resolveSingleFileWithApi(ctx, fileId, apiKey) {
     file.mimeType && file.mimeType.startsWith("application/vnd.google-apps.");
   const downloadUrl = isGoogleDoc
     ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf&key=${apiKey}`
-    : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&acknowledgeAbuse=true&key=${apiKey}`;
+    : await resolveApiDownloadTarget(fileId, apiKey);
 
   ctx.res = {
     name: isGoogleDoc ? `${file.name}.pdf` : file.name,
